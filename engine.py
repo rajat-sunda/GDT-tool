@@ -7,15 +7,22 @@ A single-file Streamlit application for GD&T (Geometric Dimensioning &
 Tolerancing) tolerance stack-up analysis in automotive Body-in-White
 (BIW) assemblies.
 
-This file is organized into two clearly separated sections:
+This file is organized into three clearly separated sections:
 
     1. CALCULATION ENGINE  - pure Python + networkx, no Streamlit calls.
                               (Component, Feature, Interface, Assembly)
-    2. STREAMLIT UI         - everything that touches st.*, session
-                              state, input validation, and rendering.
+    2. STYLING / HTML HELPERS - color palette and small HTML renderers
+                              used to draw the custom results table,
+                              connectivity tree, and section headers.
+                              Native Streamlit widgets can't do things
+                              like per-cell badges or custom borders, so
+                              these are rendered as inline-styled HTML
+                              via st.markdown(..., unsafe_allow_html=True).
+    3. STREAMLIT UI         - everything that touches st.*, session
+                              state, input validation, and page layout.
 
 They are combined into one file purely for simplicity of deployment
-(single "main module" for Streamlit Cloud). The engine section still
+(a single "main module" for Streamlit Cloud). The engine section still
 has zero UI dependencies internally and could be lifted into its own
 engine.py later with no changes.
 
@@ -30,10 +37,14 @@ Business Rule:
     interface tolerance crossed along the shortest path from the datum
     component to the feature's component, and the feature's own
     tolerance.
+
+Display precision: all inputs and calculated results are rounded to
+2 decimal places throughout the UI and CSV export.
 """
 
 from __future__ import annotations
 
+import html
 import math
 import uuid
 from dataclasses import dataclass, field
@@ -309,10 +320,309 @@ class Assembly:
 
 
 # =============================================================================
-# 2. STREAMLIT UI
+# 2. STYLING / HTML HELPERS
+# =============================================================================
+
+# -- Color palette --------------------------------------------------------
+DARK_NAVY = "#1B2A4A"          # section headers, panel titles, table header bg, Calculate button
+DARK_NAVY_HOVER = "#243B66"    # Calculate button hover state
+WHITE_ROW = "#FFFFFF"
+LIGHT_ROW = "#F0F4F8"          # alternating row shade
+BORDER_BLUE_GREY = "#8CA3C4"   # table borders
+MUTED_TEXT = "#5B6B82"         # secondary/muted text (e.g. tolerance values in connectivity tree)
+
+SAMEBODY_BG = "#E1F5E9"        # "(same body)" badge background
+SAMEBODY_TEXT = "#1E6B3A"      # "(same body)" badge text (dark green)
+
+NOPATH_BG = "#FBE7E7"          # "No path found" row/badge background
+NOPATH_TEXT = "#8A1F1F"        # "No path found" text (dark red)
+
+DATUM_BADGE_BG = "#DCEBFB"     # "[Datum]" badge background (light blue)
+DATUM_BADGE_TEXT = "#1B4F91"   # "[Datum]" badge text (dark blue)
+
+FONT_STACK = "'Segoe UI', Arial, sans-serif"
+
+# Number of decimal places used for every displayed and exported value.
+DECIMALS = 2
+
+
+def inject_global_css() -> None:
+    """Inject the one-time global <style> block used by every custom HTML element."""
+    st.markdown(
+        f"""
+        <style>
+        .section-header {{
+            color: {DARK_NAVY};
+            font-weight: 700;
+            font-family: {FONT_STACK};
+            font-size: 1.05rem;
+            margin-top: 0.6rem;
+            margin-bottom: 0.3rem;
+        }}
+        .panel-title {{
+            color: {DARK_NAVY};
+            font-weight: 700;
+            font-family: {FONT_STACK};
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }}
+        .datum-badge {{
+            background-color: {DATUM_BADGE_BG};
+            color: {DATUM_BADGE_TEXT};
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 700;
+            font-size: 0.82rem;
+            font-family: {FONT_STACK};
+        }}
+        .samebody-badge {{
+            display: inline-block;
+            background-color: {SAMEBODY_BG};
+            color: {SAMEBODY_TEXT};
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 0.68rem;
+            font-family: {FONT_STACK};
+            margin-top: 3px;
+        }}
+        .nopath-badge {{
+            display: inline-block;
+            background-color: {NOPATH_BG};
+            color: {NOPATH_TEXT};
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            font-family: {FONT_STACK};
+        }}
+        .connectivity-line {{
+            font-family: {FONT_STACK};
+            font-size: 0.92rem;
+            padding: 3px 0;
+        }}
+        .results-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-family: {FONT_STACK};
+            font-size: 0.9rem;
+            border: 1px solid {BORDER_BLUE_GREY};
+        }}
+        .results-table th {{
+            background-color: {DARK_NAVY};
+            color: #FFFFFF;
+            font-weight: 700;
+            text-align: center;
+            padding: 9px 10px;
+            border: 1px solid {BORDER_BLUE_GREY};
+        }}
+        .results-table td {{
+            padding: 8px 10px;
+            border: 1px solid {BORDER_BLUE_GREY};
+            vertical-align: middle;
+        }}
+        /* Calculate button: force dark navy background regardless of the
+           active Streamlit theme. Multiple selectors are included for
+           resilience across Streamlit versions, since the exact DOM
+           attribute used for "primary" buttons has changed over time. */
+        button[kind="primary"],
+        button[data-testid="stBaseButton-primary"] {{
+            background-color: {DARK_NAVY} !important;
+            color: #FFFFFF !important;
+            border: 1px solid {DARK_NAVY} !important;
+        }}
+        button[kind="primary"]:hover,
+        button[data-testid="stBaseButton-primary"]:hover {{
+            background-color: {DARK_NAVY_HOVER} !important;
+            color: #FFFFFF !important;
+            border: 1px solid {DARK_NAVY_HOVER} !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def styled_section_header(text: str) -> None:
+    """Render a sidebar section header (e.g. '1. Components') in dark navy."""
+    st.markdown(f"<div class='section-header'>{html.escape(text)}</div>", unsafe_allow_html=True)
+
+
+def styled_panel_title(text: str) -> None:
+    """Render a main-panel title (e.g. 'Results Table') in dark navy."""
+    st.markdown(f"<div class='panel-title'>{html.escape(text)}</div>", unsafe_allow_html=True)
+
+
+def render_connectivity_tree_html(assembly: Assembly) -> str:
+    """Render the BFS spanning tree rooted at the current datum as styled HTML.
+
+    The datum's own line carries a light-blue "[Datum]" badge; every
+    other line shows "connects to <component> (interface: X.XX mm)"
+    indented according to its depth in the spanning tree. Components
+    unreachable from the datum simply do not appear (their features
+    will show "No path found" in the results table instead).
+    """
+    graph = assembly.build_graph()
+    datum_id = assembly.reference_datum_component_id
+
+    if datum_id is None or datum_id not in graph:
+        return "<p>No reference datum selected.</p>"
+
+    bfs_tree = nx.bfs_tree(graph, source=datum_id)
+    lines: List[str] = []
+
+    def comp_name(cid: str) -> str:
+        comp = assembly.get_component_by_id(cid)
+        return comp.name if comp else cid
+
+    def walk(node: str, parent: Optional[str], depth: int) -> None:
+        name = html.escape(comp_name(node))
+        if parent is None:
+            datum_tol = assembly.reference_datum_tolerance or 0.0
+            lines.append(
+                "<div class='connectivity-line'>"
+                "<span class='datum-badge'>[Datum]</span> "
+                f"<strong>{name}</strong>"
+                f"<span style='color:{MUTED_TEXT};'> (datum tolerance: "
+                f"{datum_tol:.{DECIMALS}f} mm)</span>"
+                "</div>"
+            )
+        else:
+            tol = graph[parent][node]["tolerance"]
+            indent_px = 20 * depth
+            lines.append(
+                f"<div class='connectivity-line' style='padding-left:{indent_px}px;'>"
+                f"connects to <strong>{name}</strong>"
+                f"<span style='color:{MUTED_TEXT};'> (interface: {tol:.{DECIMALS}f} mm)</span>"
+                "</div>"
+            )
+        for child in sorted(bfs_tree.successors(node), key=comp_name):
+            walk(child, node, depth + 1)
+
+    walk(datum_id, None, 0)
+    return "".join(lines)
+
+
+def build_results_table_html(assembly: Assembly, results: Dict[str, Dict]) -> str:
+    """Build the styled results table shown in the main panel.
+
+    Columns: S. No. | Functional Feature Name | Component |
+             Datum Reference | Effective RSS Tolerance (mm)
+
+    No formula or intermediate stack-up values are shown here; each
+    feature is its own row with its own single tolerance value. Rows
+    alternate white / light blue-grey, features on the datum's own
+    component get a "(same body)" badge under the number, and
+    disconnected features get a "No path found" badge with a red-tinted
+    row instead of crashing.
+    """
+    datum_comp = (
+        assembly.get_component_by_id(assembly.reference_datum_component_id)
+        if assembly.reference_datum_component_id
+        else None
+    )
+    datum_label = html.escape(datum_comp.name) if datum_comp else "-"
+
+    header_html = (
+        "<tr>"
+        "<th style='text-align:center;'>S. No.</th>"
+        "<th style='text-align:center;'>Functional Feature Name</th>"
+        "<th style='text-align:center;'>Component</th>"
+        "<th style='text-align:center;'>Datum Reference</th>"
+        "<th style='text-align:center;'>Effective RSS Tolerance (mm)</th>"
+        "</tr>"
+    )
+
+    row_fragments: List[str] = []
+    for idx, feature in enumerate(assembly.features, start=1):
+        comp = assembly.get_component_by_id(feature.component_id)
+        comp_name = html.escape(comp.name if comp else feature.component_id)
+        feature_name = html.escape(feature.name)
+        entry = results.get(feature.id, {})
+
+        if entry.get("error"):
+            row_bg = NOPATH_BG
+            text_color = NOPATH_TEXT
+            tolerance_cell = "<span class='nopath-badge'>No path found</span>"
+        else:
+            row_bg = WHITE_ROW if idx % 2 == 1 else LIGHT_ROW
+            text_color = "#1A1A1A"
+            effective_val = round(entry["effective_tolerance"], DECIMALS)
+            same_body = feature.component_id == assembly.reference_datum_component_id
+            if same_body:
+                tolerance_cell = (
+                    f"{effective_val:.{DECIMALS}f}<br>"
+                    "<span class='samebody-badge'>(same body)</span>"
+                )
+            else:
+                tolerance_cell = f"{effective_val:.{DECIMALS}f}"
+
+        row_fragments.append(
+            f"<tr style='background-color:{row_bg}; color:{text_color};'>"
+            f"<td style='text-align:left;'>{idx}</td>"
+            f"<td style='text-align:left;'>{feature_name}</td>"
+            f"<td style='text-align:left;'>{comp_name}</td>"
+            f"<td style='text-align:center;'>{datum_label}</td>"
+            f"<td style='text-align:center;'>{tolerance_cell}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<table class='results-table'>"
+        f"<thead>{header_html}</thead>"
+        f"<tbody>{''.join(row_fragments)}</tbody>"
+        "</table>"
+    )
+
+
+def build_export_dataframe(assembly: Assembly, results: Dict[str, Dict]) -> pd.DataFrame:
+    """Build the DataFrame used for CSV export.
+
+    Mirrors the on-screen results table (S. No., Functional Feature
+    Name, Component, Datum Reference, Effective RSS Tolerance) with one
+    addition: a plain-text "Notes" column carrying "(same body)" or
+    "No path found", since a CSV can't render colored badges the way
+    the on-screen table does.
+    """
+    datum_comp = (
+        assembly.get_component_by_id(assembly.reference_datum_component_id)
+        if assembly.reference_datum_component_id
+        else None
+    )
+    datum_label = datum_comp.name if datum_comp else ""
+
+    rows = []
+    for idx, feature in enumerate(assembly.features, start=1):
+        comp = assembly.get_component_by_id(feature.component_id)
+        comp_name = comp.name if comp else feature.component_id
+        entry = results.get(feature.id, {})
+
+        if entry.get("error"):
+            effective_val = ""
+            note = "No path found"
+        else:
+            effective_val = round(entry["effective_tolerance"], DECIMALS)
+            same_body = feature.component_id == assembly.reference_datum_component_id
+            note = "(same body)" if same_body else ""
+
+        rows.append(
+            {
+                "S. No.": idx,
+                "Functional Feature Name": feature.name,
+                "Component": comp_name,
+                "Datum Reference": datum_label,
+                "Effective RSS Tolerance (mm)": effective_val,
+                "Notes": note,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 3. STREAMLIT UI
 # =============================================================================
 
 st.set_page_config(page_title="Assembly Tolerance Propagation Tool", layout="wide")
+inject_global_css()
 
 
 # -- Session state -------------------------------------------------------
@@ -394,83 +704,6 @@ def remove_feature(feature_id: str) -> None:
     st.session_state.results = None
 
 
-def render_bfs_tree(assembly: Assembly) -> str:
-    """Render the BFS spanning tree rooted at the current datum as formatted text.
-
-    Example output:
-        [Datum] Part A  (datum tolerance: 0.1000 mm)
-            connects to Part B  (interface: 0.1200 mm)
-            connects to Part C  (interface: 0.0800 mm)
-
-    Components unreachable from the datum simply do not appear (their
-    features will show "No path found" in the results table instead).
-    """
-    graph = assembly.build_graph()
-    datum_id = assembly.reference_datum_component_id
-
-    if datum_id is None or datum_id not in graph:
-        return "No reference datum selected."
-
-    bfs_tree = nx.bfs_tree(graph, source=datum_id)
-    lines: List[str] = []
-
-    def comp_name(cid: str) -> str:
-        comp = assembly.get_component_by_id(cid)
-        return comp.name if comp else cid
-
-    def walk(node: str, parent: Optional[str], depth: int) -> None:
-        name = comp_name(node)
-        if parent is None:
-            datum_tol = assembly.reference_datum_tolerance or 0.0
-            lines.append(f"[Datum] {name}  (datum tolerance: {datum_tol:.4f} mm)")
-        else:
-            tol = graph[parent][node]["tolerance"]
-            indent = "    " * (depth - 1)
-            lines.append(f"{indent}connects to {name}  (interface: {tol:.4f} mm)")
-        for child in sorted(bfs_tree.successors(node), key=comp_name):
-            walk(child, node, depth + 1)
-
-    walk(datum_id, None, 0)
-    return "\n".join(lines)
-
-
-def build_results_dataframe(assembly: Assembly, results: Dict[str, Dict]) -> pd.DataFrame:
-    """Build the results table shown in the UI (and used for CSV export).
-
-    Columns: Feature | Component | Own Tolerance (mm) |
-             Effective RSS Tolerance (mm) | Path | Tolerance Stack
-
-    All tolerance values are rounded to 4 decimal places. Features with
-    no path to the datum show "No path found" instead of a value.
-    """
-    rows = []
-    for feature in assembly.features:
-        comp = assembly.get_component_by_id(feature.component_id)
-        comp_name = comp.name if comp else feature.component_id
-        entry = results.get(feature.id, {})
-
-        if entry.get("error"):
-            effective_display = "No path found"
-            path_display = "No path found"
-            stack_display = "No path found"
-        else:
-            effective_display = f"{round(entry['effective_tolerance'], 4):.4f}"
-            path_display = " \u2192 ".join(entry["path"])
-            stack_display = str([round(v, 4) for v in entry["tolerance_stack"]])
-
-        rows.append(
-            {
-                "Feature": feature.name,
-                "Component": comp_name,
-                "Own Tolerance (mm)": round(feature.tolerance, 4),
-                "Effective RSS Tolerance (mm)": effective_display,
-                "Path": path_display,
-                "Tolerance Stack": stack_display,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 # -- Sidebar: all inputs --------------------------------------------------
 
 st.title("Assembly Tolerance Propagation Tool")
@@ -478,7 +711,7 @@ st.title("Assembly Tolerance Propagation Tool")
 with st.sidebar:
 
     # --- Section 1: Components ---
-    st.header("1. Components")
+    styled_section_header("1. Components")
     with st.form("add_component_form", clear_on_submit=True):
         new_component_name = st.text_input("Component name")
         add_component_submitted = st.form_submit_button("Add Component")
@@ -501,7 +734,7 @@ with st.sidebar:
     st.divider()
 
     # --- Section 2: Interfaces ---
-    st.header("2. Interfaces")
+    styled_section_header("2. Interfaces")
     if len(st.session_state.components) < 2:
         st.info("Add at least two components before creating an interface.")
     else:
@@ -519,7 +752,7 @@ with st.sidebar:
             )
             interface_tolerance = st.number_input(
                 "Interface Tolerance (mm)", min_value=0.0, value=0.0,
-                step=0.01, format="%.4f",
+                step=0.01, format=f"%.{DECIMALS}f",
             )
             add_interface_submitted = st.form_submit_button("Add Interface")
             if add_interface_submitted:
@@ -534,7 +767,7 @@ with st.sidebar:
                         Interface(
                             component_1_id=comp_1_id,
                             component_2_id=comp_2_id,
-                            tolerance=interface_tolerance,
+                            tolerance=round(interface_tolerance, DECIMALS),
                         )
                     )
                     st.session_state.results = None
@@ -545,7 +778,7 @@ with st.sidebar:
         name_1 = comp_options_all.get(iface.component_1_id, "?")
         name_2 = comp_options_all.get(iface.component_2_id, "?")
         col1, col2 = st.columns([4, 1])
-        col1.write(f"{name_1} \u2014 {name_2}: {round(iface.tolerance, 4)} mm")
+        col1.write(f"{name_1} \u2014 {name_2}: {round(iface.tolerance, DECIMALS):.{DECIMALS}f} mm")
         if col2.button("Remove", key=f"remove_interface_{idx}"):
             remove_interface(idx)
             st.rerun()
@@ -553,7 +786,7 @@ with st.sidebar:
     st.divider()
 
     # --- Section 3: Features ---
-    st.header("3. Features")
+    styled_section_header("3. Features")
     if len(st.session_state.components) == 0:
         st.info("Add at least one component before adding features.")
     else:
@@ -568,7 +801,7 @@ with st.sidebar:
             )
             feature_tolerance = st.number_input(
                 "Feature tolerance (mm)", min_value=0.0, value=0.0,
-                step=0.01, format="%.4f",
+                step=0.01, format=f"%.{DECIMALS}f",
             )
             add_feature_submitted = st.form_submit_button("Add Feature")
             if add_feature_submitted:
@@ -582,7 +815,7 @@ with st.sidebar:
                         Feature(
                             name=name,
                             component_id=feature_component_id,
-                            tolerance=feature_tolerance,
+                            tolerance=round(feature_tolerance, DECIMALS),
                         )
                     )
                     st.session_state.results = None
@@ -592,7 +825,7 @@ with st.sidebar:
         comp_options_all = {c.id: c.name for c in st.session_state.components}
         comp_name = comp_options_all.get(feat.component_id, "?")
         col1, col2 = st.columns([4, 1])
-        col1.write(f"{feat.name} ({comp_name}): {round(feat.tolerance, 4)} mm")
+        col1.write(f"{feat.name} ({comp_name}): {round(feat.tolerance, DECIMALS):.{DECIMALS}f} mm")
         if col2.button("Remove", key=f"remove_feature_{feat.id}"):
             remove_feature(feat.id)
             st.rerun()
@@ -600,7 +833,7 @@ with st.sidebar:
     st.divider()
 
     # --- Section 4: Reference Datum ---
-    st.header("4. Reference Datum")
+    styled_section_header("4. Reference Datum")
     if len(st.session_state.components) == 0:
         st.info("Add at least one component to select a reference datum.")
     else:
@@ -619,15 +852,15 @@ with st.sidebar:
         selected_datum_tolerance = st.number_input(
             "Datum tolerance (mm)", min_value=0.0,
             value=float(st.session_state.datum_tolerance or 0.0),
-            step=0.01, format="%.4f", key="datum_tol_input",
+            step=0.01, format=f"%.{DECIMALS}f", key="datum_tol_input",
         )
         st.session_state.datum_component_id = selected_datum_id
-        st.session_state.datum_tolerance = selected_datum_tolerance
+        st.session_state.datum_tolerance = round(selected_datum_tolerance, DECIMALS)
 
     st.divider()
 
     # --- Section 5: Action ---
-    st.header("5. Action")
+    styled_section_header("5. Action")
 
     datum_missing = st.session_state.datum_component_id is None
     datum_invalid = (
@@ -641,7 +874,7 @@ with st.sidebar:
     elif datum_invalid:
         st.warning("Enter a positive datum tolerance before calculating.")
 
-    if st.button("Calculate", disabled=calculate_disabled):
+    if st.button("Calculate", type="primary", disabled=calculate_disabled):
         assembly = get_current_assembly()
         try:
             st.session_state.results = assembly.calculate_all()
@@ -651,7 +884,7 @@ with st.sidebar:
 
     if st.session_state.results is not None:
         export_assembly = get_current_assembly()
-        export_df = build_results_dataframe(export_assembly, st.session_state.results)
+        export_df = build_export_dataframe(export_assembly, st.session_state.results)
         csv_data = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Export Results to CSV",
@@ -671,12 +904,11 @@ if st.session_state.results is not None:
     left_col, right_col = st.columns(2)
 
     with left_col:
-        st.subheader("Assembly Connectivity")
-        st.text(render_bfs_tree(assembly))
+        styled_panel_title("Assembly Connectivity")
+        st.markdown(render_connectivity_tree_html(assembly), unsafe_allow_html=True)
 
     with right_col:
-        st.subheader("Results Table")
-        results_df = build_results_dataframe(assembly, st.session_state.results)
-        st.dataframe(results_df, use_container_width=True, hide_index=True)
+        styled_panel_title("Results Table")
+        st.markdown(build_results_table_html(assembly, st.session_state.results), unsafe_allow_html=True)
 else:
     st.info("Add components, interfaces, and features in the sidebar, select a reference datum, then click Calculate.")
