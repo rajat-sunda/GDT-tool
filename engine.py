@@ -1,72 +1,22 @@
-"""
-app.py
-
-Assembly Tolerance Propagation Tool (Stage-Based / Hierarchical Model)
-------------------------------------------------------------------------
-A single-file Streamlit application for GD&T (Geometric Dimensioning &
-Tolerancing) tolerance stack-up analysis in automotive Body-in-White
-(BIW) assemblies, using a hierarchical, stage-based freezing model that
-mirrors real assembly stations: once parts are joined into a
-subassembly, that subassembly's feature tolerances are computed and
-LOCKED. Future stages take those frozen values as fixed inputs and never
-reopen or recompute earlier stages.
-
-This file is organized into three sections:
-
-    1. CALCULATION ENGINE     - Part, Feature, Subassembly. No UI calls.
-    2. STYLING / HTML HELPERS - color palette + HTML renderers for the
-                                 results table and section/panel titles.
-    3. STREAMLIT UI            - staged workflow: create Parts, build
-                                 Subassemblies from available (unconsumed)
-                                 Parts/Subassemblies, freeze, repeat.
-
-Tolerance propagation method: Root Sum Square (RSS), unchanged from the
-previous version:
-    T_effective = sqrt(sum(T_i ** 2 for T_i in tolerance_stack))
-
-Business Rule (same-body rule, unchanged):
-    Features on the child that carries a stage's datum get their own
-    tolerance only (no RSS). Features on every other child at that stage
-    get RSS(datum_tolerance, interface_tolerance, feature's own current
-    tolerance) - where "current tolerance" is the feature's original
-    tolerance if its child is a raw Part, or its already-frozen value if
-    its child is a previously frozen Subassembly.
-
-Display precision: all inputs and calculated results are rounded to
-2 decimal places throughout the UI and CSV export.
-"""
-
 from __future__ import annotations
 
 import html
 import math
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Tuple, Union
 
 import pandas as pd
 import streamlit as st
 
 
-# =============================================================================
-# 1. CALCULATION ENGINE (no Streamlit / UI dependencies)
-# =============================================================================
+# ============================================================
+# 1. ENGINE
+# ============================================================
 
 
 @dataclass
 class Feature:
-    """A toleranced feature (hole, slot, etc.) defined on a Part.
-
-    Attributes:
-        name: Human-readable feature name (e.g. "Hole A").
-        own_tolerance: The feature's original tolerance from the part's
-            drawing. Immutable - this never changes once set.
-        source_part_name: Name of the Part this feature was originally
-            defined on. Kept for traceability even after the feature's
-            effective tolerance has been through several frozen stages.
-        id: Unique identifier, auto-generated with uuid4.
-    """
-
     name: str
     own_tolerance: float
     source_part_name: str
@@ -75,35 +25,11 @@ class Feature:
 
 @dataclass
 class Part:
-    """A raw physical part with its own set of toleranced features.
-
-    A Part is the base building block. It can be joined with other Parts
-    (or previously frozen Subassemblies) into a new Subassembly. Once a
-    Part has been used as a child of a Subassembly, it is considered
-    "consumed" and is no longer offered as a building block elsewhere
-    (mirroring the fact that a physically welded-in part can't be pulled
-    back out and reused loose).
-
-    Attributes:
-        name: Human-readable part name (e.g. "Part1").
-        features: The features defined on this part.
-        id: Unique identifier, auto-generated with uuid4.
-    """
-
     name: str
     features: List[Feature] = field(default_factory=list)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def add_feature(self, name: str, tolerance: float) -> Feature:
-        """Create and attach a new Feature to this Part.
-
-        Args:
-            name: The feature's name.
-            tolerance: The feature's own positional tolerance, in mm.
-
-        Returns:
-            The newly created Feature.
-        """
         feat = Feature(name=name, own_tolerance=tolerance, source_part_name=self.name)
         self.features.append(feat)
         return feat
@@ -111,18 +37,6 @@ class Part:
 
 @dataclass
 class FrozenFeatureResult:
-    """One feature's locked-in effective tolerance as of a specific Subassembly stage.
-
-    Attributes:
-        feature_id: Id of the original Feature this result belongs to.
-        feature_name: The feature's name (carried through unchanged).
-        source_part_name: The original Part the feature was defined on.
-        effective_tolerance: The frozen effective tolerance at this stage.
-        same_body: True if this feature's child carried the datum at
-            THIS stage (meaning no RSS happened here - the value simply
-            passed through unchanged from whatever it was going in).
-    """
-
     feature_id: str
     feature_name: str
     source_part_name: str
@@ -134,54 +48,15 @@ ToleranceCombinationMethod = Callable[[List[float]], float]
 
 
 def rss_combine(tolerance_stack: List[float]) -> float:
-    """Root Sum Square combination: sqrt(sum(t ** 2 for t in stack))."""
     return math.sqrt(sum(t ** 2 for t in tolerance_stack))
 
 
 def worst_case_combine(tolerance_stack: List[float]) -> float:
-    """Worst Case (linear addition) combination: sum(stack).
-
-    Example of an alternative propagation method that can be swapped in
-    later without modifying the Subassembly class or the UI. Not used
-    by default.
-    """
     return sum(tolerance_stack)
 
 
 @dataclass
 class Subassembly:
-    """A joining stage: two or more children combined via one interface.
-
-    A "child" is either a raw Part or a previously frozen Subassembly.
-    Exactly one child is designated as carrying the reference datum for
-    this stage. All other children are joined to it through a single
-    interface tolerance representing this stage's joining operation
-    (e.g. one weld/fixture station).
-
-    Once calculate_and_freeze() is called, this Subassembly's
-    frozen_results holds the locked effective tolerance of every feature
-    it contains - both those newly computed at this stage and those
-    simply inherited (passed through) from the datum-carrying child. The
-    Subassembly itself can then be used as a single child of a
-    higher-level Subassembly; its original children are never reopened.
-
-    Attributes:
-        name: Human-readable name for this stage (e.g. "Subassembly12").
-        children: The Parts/Subassemblies joined at this stage (>= 2).
-        datum_child_id: Id of whichever child carries the datum here.
-        datum_tolerance: The datum's own tolerance at this stage. If the
-            datum-carrying child is itself a frozen Subassembly, this is
-            expected to be that Subassembly's own datum_tolerance,
-            reused rather than re-entered (see the UI layer, which
-            enforces this by auto-filling and locking the field).
-        interface_tolerance: The single joining-operation tolerance
-            applied to every non-datum child at this stage.
-        id: Unique identifier, auto-generated with uuid4.
-        is_frozen: True once calculate_and_freeze() has been run.
-        frozen_results: Dict of feature_id -> FrozenFeatureResult, filled
-            in by calculate_and_freeze().
-    """
-
     name: str
     children: List[Union[Part, "Subassembly"]]
     datum_child_id: str
@@ -192,15 +67,6 @@ class Subassembly:
     frozen_results: Dict[str, FrozenFeatureResult] = field(default_factory=dict)
 
     def _child_features(self, child: Union[Part, "Subassembly"]) -> List[Tuple[str, str, str, float]]:
-        """Return (feature_id, feature_name, source_part_name, current_tolerance)
-        for every feature contained in `child`, whichever kind of child it is.
-
-        For a raw Part, "current_tolerance" is the feature's own_tolerance.
-        For a frozen Subassembly, "current_tolerance" is that feature's
-        already-frozen effective_tolerance from the child's own
-        frozen_results - the underlying part-level tolerances that
-        produced it are never revisited.
-        """
         if isinstance(child, Part):
             return [(f.id, f.name, f.source_part_name, f.own_tolerance) for f in child.features]
         elif isinstance(child, Subassembly):
@@ -211,22 +77,6 @@ class Subassembly:
         return []
 
     def calculate_and_freeze(self, method: ToleranceCombinationMethod = rss_combine) -> None:
-        """Compute every feature's effective tolerance at this stage and lock it in.
-
-        Business Rule:
-            Features belonging to the datum-carrying child pass through
-            unchanged (their current tolerance, no RSS). Features
-            belonging to every other child get
-            method([datum_tolerance, interface_tolerance, current_tolerance]).
-
-        This is idempotent-safe to call only once per Subassembly by
-        convention; the UI is expected to treat a Subassembly as
-        immutable once is_frozen is True.
-
-        Raises:
-            ValueError: If fewer than two children are present, or if
-                datum_child_id does not match one of the children.
-        """
         if len(self.children) < 2:
             raise ValueError("A subassembly needs at least two children to join.")
 
@@ -255,7 +105,6 @@ class Subassembly:
 
     @property
     def datum_child_label(self) -> str:
-        """Human-readable name of whichever child carries this stage's datum."""
         for c in self.children:
             if c.id == self.datum_child_id:
                 return c.name
@@ -263,15 +112,13 @@ class Subassembly:
 
     @property
     def child_names(self) -> List[str]:
-        """Names of every child joined at this stage, for display purposes."""
         return [c.name for c in self.children]
 
 
-# =============================================================================
+# ============================================================
 # 2. STYLING / HTML HELPERS
-# =============================================================================
+# ============================================================
 
-# -- Color palette (unchanged from the previous version) --------------------
 DARK_NAVY = "#1B2A4A"
 DARK_NAVY_HOVER = "#243B66"
 WHITE_ROW = "#FFFFFF"
@@ -290,7 +137,6 @@ DECIMALS = 2
 
 
 def inject_global_css() -> None:
-    """Inject the one-time global <style> block used by every custom HTML element."""
     st.markdown(
         f"""
         <style>
@@ -379,12 +225,10 @@ def inject_global_css() -> None:
 
 
 def styled_section_header(text: str) -> None:
-    """Render a sidebar section header in dark navy."""
     st.markdown(f"<div class='section-header'>{html.escape(text)}</div>", unsafe_allow_html=True)
 
 
 def styled_panel_title_with_badge(text: str) -> None:
-    """Render a main-panel stage title (dark navy) with a 'FROZEN' badge beside it."""
     st.markdown(
         f"<span class='panel-title'>{html.escape(text)}</span>"
         f"<span class='frozen-badge'>FROZEN</span>",
@@ -393,14 +237,6 @@ def styled_panel_title_with_badge(text: str) -> None:
 
 
 def build_subassembly_table_html(sub: Subassembly) -> str:
-    """Build the styled results table for one frozen Subassembly.
-
-    Columns: S. No. | Functional Feature Name | Component | Datum
-    Reference | Effective RSS Tolerance (mm). No formula or intermediate
-    stack-up values are shown - each feature is one row with one number.
-    Features whose child carried the datum at this stage get a
-    "(same body)" badge under their value.
-    """
     header_html = (
         "<tr>"
         "<th style='text-align:center;'>S. No.</th>"
@@ -414,15 +250,12 @@ def build_subassembly_table_html(sub: Subassembly) -> str:
     row_fragments: List[str] = []
     for idx, result in enumerate(sub.frozen_results.values(), start=1):
         row_bg = WHITE_ROW if idx % 2 == 1 else LIGHT_ROW
-        effective_val = round(result.effective_tolerance, DECIMALS)
+        effective_str = f"{result.effective_tolerance:.{DECIMALS}f}"
 
         if result.same_body:
-            tolerance_cell = (
-                f"{effective_val:.{DECIMALS}f}<br>"
-                "<span class='samebody-badge'>(same body)</span>"
-            )
+            tolerance_cell = f"{effective_str}<br><span class='samebody-badge'>(same body)</span>"
         else:
-            tolerance_cell = f"{effective_val:.{DECIMALS}f}"
+            tolerance_cell = effective_str
 
         row_fragments.append(
             f"<tr style='background-color:{row_bg}; color:#1A1A1A;'>"
@@ -443,12 +276,6 @@ def build_subassembly_table_html(sub: Subassembly) -> str:
 
 
 def build_subassembly_export_dataframe(sub: Subassembly) -> pd.DataFrame:
-    """Build the DataFrame used for this Subassembly's per-stage CSV export.
-
-    Mirrors the on-screen table with one addition: a plain-text "Notes"
-    column carrying "(same body)" where applicable, since a CSV can't
-    render the colored badge the on-screen table uses.
-    """
     rows = []
     for idx, result in enumerate(sub.frozen_results.values(), start=1):
         rows.append(
@@ -457,32 +284,29 @@ def build_subassembly_export_dataframe(sub: Subassembly) -> pd.DataFrame:
                 "Functional Feature Name": result.feature_name,
                 "Component": result.source_part_name,
                 "Datum Reference": sub.datum_child_label,
-                "Effective RSS Tolerance (mm)": round(result.effective_tolerance, DECIMALS),
+                # Formatted as a fixed 2-decimal string (not a raw float) so the
+                # CSV matches the on-screen table exactly - a bare float here
+                # would print "0.1" instead of "0.10" and silently lose precision.
+                "Effective RSS Tolerance (mm)": f"{result.effective_tolerance:.{DECIMALS}f}",
                 "Notes": "(same body)" if result.same_body else "",
             }
         )
     return pd.DataFrame(rows)
 
 
-# =============================================================================
+# ============================================================
 # 3. STREAMLIT UI
-# =============================================================================
+# ============================================================
 
 st.set_page_config(page_title="Assembly Tolerance Propagation Tool", layout="wide")
 inject_global_css()
 
 
-# -- Session state -------------------------------------------------------
-
 def init_session_state() -> None:
-    """Initialize all required session_state keys exactly once.
-
-    The tool starts completely empty; no sample data is pre-loaded.
-    """
     defaults = {
-        "parts": [],               # list[Part] - every part ever created
-        "subassemblies": [],       # list[Subassembly] - frozen stages, in creation order
-        "available_unit_ids": [],  # list[str] - ids of Parts/Subassemblies not yet consumed
+        "parts": [],
+        "subassemblies": [],
+        "available_unit_ids": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -493,27 +317,21 @@ init_session_state()
 
 
 def get_all_units() -> List[Union[Part, Subassembly]]:
-    """Every Part and Subassembly that has ever been created, combined."""
     return st.session_state.parts + st.session_state.subassemblies
 
 
 def get_available_units() -> List[Union[Part, Subassembly]]:
-    """Units (Parts or frozen Subassemblies) not yet consumed as a child elsewhere."""
     return [u for u in get_all_units() if u.id in st.session_state.available_unit_ids]
 
 
 def is_consumed(unit_id: str) -> bool:
-    """True if a unit has already been used as a child of some Subassembly."""
     return unit_id not in st.session_state.available_unit_ids
 
-
-# -- Sidebar: Parts & Features --------------------------------------------
 
 st.title("Assembly Tolerance Propagation Tool")
 
 with st.sidebar:
 
-    # --- Section 1: Parts ---
     styled_section_header("1. Parts")
     with st.form("add_part_form", clear_on_submit=True):
         new_part_name = st.text_input("Part name")
@@ -528,7 +346,6 @@ with st.sidebar:
                 st.session_state.available_unit_ids.append(new_part.id)
                 st.success(f"Added part '{name}'.")
 
-    # --- Section 2: Features ---
     styled_section_header("2. Features")
     unconsumed_parts = [p for p in st.session_state.parts if not is_consumed(p.id)]
     if not unconsumed_parts:
@@ -557,14 +374,13 @@ with st.sidebar:
                     target_part.add_feature(name, round(feature_tolerance, DECIMALS))
                     st.success(f"Added feature '{name}' to '{target_part.name}'.")
 
-    # --- Parts & features list ---
     for part in st.session_state.parts:
         consumed = is_consumed(part.id)
         label = part.name + ("  (used - locked)" if consumed else "")
         with st.expander(label):
             if part.features:
                 for feat in part.features:
-                    st.write(f"- {feat.name}: {round(feat.own_tolerance, DECIMALS):.{DECIMALS}f} mm")
+                    st.write(f"- {feat.name}: {feat.own_tolerance:.{DECIMALS}f} mm")
             else:
                 st.caption("No features yet.")
             if not consumed:
@@ -577,7 +393,6 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Section 3: Build a Subassembly ---
     styled_section_header("3. Build a Subassembly")
 
     available_units = get_available_units()
@@ -658,8 +473,6 @@ with st.sidebar:
                         st.success(f"'{name}' calculated and frozen.")
                         st.rerun()
 
-
-# -- Main panel: Build History (every frozen subassembly, in order) --------
 
 if st.session_state.subassemblies:
     for sub in st.session_state.subassemblies:
