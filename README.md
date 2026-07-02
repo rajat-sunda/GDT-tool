@@ -2,25 +2,33 @@
 
 ## 1. What this tool does
 
-This tool calculates the effective (assembly-level) positional tolerance of a
-feature — a hole, a slot, any toleranced GD&T feature — after it has passed
-through however many part-to-part joints separate it from your reference
-datum. In a Body-in-White assembly, a feature's tolerance on its own part
-drawing is never the whole story: every interface it stacks through on the
-way back to the datum adds its own variation. This tool builds a graph of
-your assembly (components as nodes, interfaces as edges), walks the shortest
-path from the datum to each feature, and combines every tolerance on that
-path using **Root Sum Square (RSS)**. Change the datum, add a component,
-remove an interface — the tool recalculates every feature's effective
-tolerance and the path it traveled, automatically.
+When you build something out of multiple parts, a car body, a bracket
+assembly, anything with holes or slots that need to line up, the tolerance
+on any one part's drawing isn't the whole story. Once parts get joined
+together, the joints themselves add variation, and that variation stacks up.
+This tool calculates that stack-up.
+
+You tell it what parts you have, what toleranced features (holes, slots,
+etc.) live on each part, which part is your reference datum, and how loose
+the joints are. It then works out the **effective tolerance** of every
+feature at the assembly level, not just what the drawing says, but what you
+can actually expect once everything is bolted, welded, or riveted together.
+
+It also supports building up in stages: calculate a first subassembly, then
+add another part on top of it and calculate again, and again, exactly the
+way a real production line adds one station after another. Each stage's
+results stay visible on screen, stacked one below the other, so you can see
+the whole build history at a glance.
+
+The math behind it is called **Root Sum Square (RSS)** 
 
 ## 2. How to install and run
 
 **Requirements:** Python 3.9 or above.
 
-1. Open a terminal and navigate to the project folder (the one containing
-   `app.py` and `requirements.txt`).
-2. Install the dependencies:
+1. Open a terminal and navigate to the folder containing `app.py` and
+   `requirements.txt`.
+2. Install the one dependency:
    ```
    pip install -r requirements.txt
    ```
@@ -28,162 +36,176 @@ tolerance and the path it traveled, automatically.
    ```
    streamlit run app.py
    ```
-4. Streamlit will start a local server and print a URL in the terminal —
-   normally:
+4. Streamlit will print a URL in the terminal, normally:
    ```
    http://localhost:8501
    ```
-   Open that address in your browser. If it doesn't open automatically,
-   copy-paste the URL yourself.
+   Open that in your browser. If it doesn't open automatically, copy-paste
+   the URL yourself.
+
+The tool starts completely empty — nothing is pre-loaded. Everything you
+enter lives only in that browser session; closing the tab clears it.
 
 ## 3. How to use the tool — step by step
 
-1. **Add your components.** In the sidebar, under "1. Components," type a
-   part name (e.g. "Part A") and click **Add Component**. Repeat for every
-   component in the assembly. Each one appears in a list below the form,
-   with a Remove button if you need to delete it.
+### Building your first subassembly
 
-2. **Add the interfaces between components.** Under "2. Interfaces," pick
-   the two components that are joined, and enter the **interface
-   tolerance** — this is the positional variation that the joint itself
-   contributes (weld nugget location tolerance, locator pin clearance,
-   fixture repeatability, etc. — whatever variation that specific joint
-   physically introduces between the two parts). Click **Add Interface**.
-   You need at least two components before this section becomes active.
+1. **Add Parts.** In the sidebar, under "1. Parts," type a part name (e.g.
+   "Part A") and click **Add Part**. Repeat for every part you're starting
+   with. Each one appears in a list with a Remove button if you need to
+   delete it.
 
-3. **Add your features.** Under "3. Features," give the feature a name
-   (e.g. "Hole 1"), choose which component it lives on, and enter its own
-   positional tolerance from the part's drawing. Click **Add Feature**.
+2. **Add Features.** Under "2. Features," pick a part from the dropdown,
+   give the feature a name (e.g. "Hole 1"), and enter its own positional
+   tolerance from the part's drawing. There's no restriction on which part
+   you can add a feature to — add as many as you need, whenever you need to.
 
-4. **Select the reference datum.** Under "4. Reference Datum," pick which
-   component is the assembly's datum reference, and enter that datum's own
-   tolerance (its locating/fixturing tolerance at the assembly level).
+3. **Set up the assembly.** Under "3. Assembly Setup":
+   - Choose **which part carries the datum** — this is your reference point,
+     the part everything else is measured relative to.
+   - Enter the **datum tolerance** — how precisely that part itself locates
+     in the assembly fixture.
+   - Enter the **interface tolerance** — the variation introduced by the
+     joint itself (weld location, locator pin clearance, fixture
+     repeatability, whatever applies physically).
+   - Click **Calculate.**
 
-5. **Click Calculate.** The button is disabled until a datum is selected
-   with a positive tolerance. Once you click it, the main panel appears
-   with two views:
-   - **Assembly Connectivity** (left): a tree showing the datum and every
-     component reachable from it, with the interface tolerance crossed to
-     reach each one.
-   - **Results Table** (right): every feature you entered, its component,
-     the current datum reference, and its calculated effective RSS
-     tolerance. Features on the same component as the datum are marked
-     "(same body)" since no stack-up applies to them. Features with no
-     connection to the datum (a disconnected part of the assembly) show
-     "No path found" instead of crashing the tool.
+4. **Read the results.** A table titled "Subassembly - Level 1" appears in
+   the main panel, with every feature's effective tolerance. Features on the
+   datum part are marked **(same body)** — no stack-up applies to them,
+   since they're not affected by a joint they're the reference for.
 
-6. **Change the datum and recalculate.** Pick a different datum component
-   in Section 4, adjust its tolerance if needed, and click **Calculate**
-   again. Nothing about the assembly graph changes — only the paths and
-   results are recomputed from the new starting point. This is a normal
-   part of BIW analysis: you'll often want to see how the same assembly
-   looks from a different reference.
+### Adding another level
 
-7. **Export to CSV.** Once you've calculated results, the **Export Results
-   to CSV** button becomes active. It downloads a spreadsheet-friendly file
-   with the same feature-by-feature results, plus a Notes column flagging
-   "(same body)" or "No path found" in plain text.
+Once Level 1 exists, a new sidebar section appears:
+
+5. **Add more parts and features** if you haven't already (same as steps 1
+   and 2 — this works at any point, not just at the start).
+
+6. **Build the next level.** Under "4. Add Next Assembly Level":
+   - **Select which new component(s)** are joining this level, from a
+     multiselect showing parts not already folded into the subassembly.
+   - **Choose which side carries the datum this time.** You can either keep
+     the datum on the subassembly you've already built (its existing
+     features simply carry forward unchanged — its datum tolerance
+     auto-fills, since it's inherited from before), or shift the datum onto
+     one of the new parts you're adding (in which case the *existing*
+     subassembly's features are the ones that get recalculated against the
+     new datum and interface).
+   - Enter the **interface tolerance** for this joining operation.
+   - Click **Calculate Next Level.**
+
+7. A new table, "Subassembly - Level 2," appears below the first one. Repeat
+   step 6 as many times as you need — every click adds one more table,
+   nothing is ever overwritten.
+
+There's no save or export button by design — every result stays visible on
+screen as you build, exactly as it's calculated.
 
 ## 4. How the calculation works
 
-The core formula is Root Sum Square:
+The formula is Root Sum Square:
 
 ```
-T_effective = sqrt(T1² + T2² + T3² + ...)
+T_effective = sqrt(T1² + T2² + ...)
 ```
 
-For a feature that is **not** on the same component as the datum, the terms
-being combined are:
+At every level, there are exactly two rules:
 
-- the **datum tolerance**,
-- the tolerance of **every interface** crossed along the shortest path from
-  the datum's component to the feature's component, in order,
-- and the **feature's own tolerance**.
+- **A feature on the datum side** gets its own current tolerance, unchanged.
+  No calculation happens to it. This is because a feature isn't affected by
+  a joint it's the reference point for.
+- **A feature on the other side** gets:
+  ```
+  T_effective = sqrt(datum_tolerance² + interface_tolerance² + own_tolerance²)
+  ```
+  where `own_tolerance` is that feature's *current* value — its original
+  drawing tolerance the first time it's included, or its most recently
+  calculated effective tolerance if it was carried forward from an earlier
+  level.
 
-**Business rule:** if the feature is on the *same* component as the current
-datum, none of that applies — its effective tolerance is simply its own
-tolerance, full stop. No datum tolerance is added, no interfaces are
-crossed, no RSS is performed, because there's no physical joint between the
-datum and the feature to introduce variation.
+That second point is what makes multi-level builds work: once a feature has
+gone through one level's calculation, its *result* becomes the input to the
+next level, not the raw numbers that produced it. This mirrors how a real
+assembly line works — station 20 doesn't reopen and recheck every individual
+part that went into the subassembly from station 10; it just works with
+whatever came out of station 10.
 
-**Why RSS instead of adding tolerances directly (worst case)?** Worst-case
-addition assumes every contributor hits its maximum deviation at the same
-time, in the same direction — which is statistically very unlikely in a
-real production run. RSS treats each contributor as an independent random
-variable and combines them the way independent variances actually combine,
-giving a realistic (rather than overly conservative) picture of expected
-stack-up.
+**Why RSS instead of just adding tolerances directly (worst case)?** Adding
+tolerances directly (worst-case addition) assumes every contributor hits its
+maximum deviation at the same time, in the same direction — which is
+statistically very unlikely in a real production run. RSS treats each
+contributor as an independent source of variation and combines them the way
+independent variation actually combines, giving a realistic rather than
+overly pessimistic picture.
 
-All tolerance values entered and displayed in this tool are rounded to
-**2 decimal places**.
+All values entered and displayed in this tool are rounded to **2 decimal
+places**.
 
-## 5. Worked examples
+## 5. Worked example (verify the tool with this)
 
-You can enter each of these from scratch to confirm the tool is behaving
-correctly.
+You can enter this from scratch to confirm everything is working correctly.
 
-### Example 1 — Two components, one interface
+### Level 1
 
-- Components: `Part A`, `Part B`
-- Interface: Part A ↔ Part B, tolerance = **0.10**
-- Datum: Part A, datum tolerance = **0.10**
-- Features:
-  - Hole 1 on Part A, tolerance = **0.05**
-  - Hole 2 on Part B, tolerance = **0.05**
+- Parts: `Part A`, `Part B`
+- Features: "Hole 1" on Part A, tolerance **0.05**; "Hole 2" on Part B,
+  tolerance **0.05**
+- Assembly setup: datum part = **Part A**, datum tolerance = **0.10**,
+  interface tolerance = **0.10**
+- Click Calculate.
 
 **Expected results:**
-- Hole 1 → **0.05**. It's on the same component as the datum, so the
-  business rule applies: its own tolerance only, no stack-up.
-- Hole 2 → **0.15**. It's on a different component, one interface away:
+- Hole 1 → **0.05**. Part A carries the datum, so it's marked "(same body)"
+  — its own tolerance only, no RSS.
+- Hole 2 → **0.15**. Part B is the other side:
   `sqrt(0.10² + 0.10² + 0.05²) = sqrt(0.0225) = 0.15`.
 
-### Example 2 — Three components in a chain
+### Level 2 — datum stays on the subassembly
 
-- Components: `Part A`, `Part B`, `Part C`
-- Interfaces: A ↔ B = **0.10**, B ↔ C = **0.08**
-- Datum: Part A, datum tolerance = **0.10**
-- Features: one hole on each part, each with tolerance **0.05**
-
-**Expected results:**
-- Hole on Part A → **0.05**. Same component as the datum — own tolerance
-  only.
-- Hole on Part B → **0.15**. One interface from the datum:
-  `sqrt(0.10² + 0.10² + 0.05²) = 0.15`.
-- Hole on Part C → **0.17**. Two interfaces from the datum, through B:
-  `sqrt(0.10² + 0.10² + 0.08² + 0.05²) = sqrt(0.0289) = 0.17`.
-
-### Example 3 — Changing the datum
-
-Using the same assembly as Example 2, change the datum to **Part C**, with
-datum tolerance = **0.08**, and click Calculate again.
+- Add a new part, `Part C`, with a feature "Hole 3," tolerance **0.05**.
+- In Section 4, select Part C as the new component, keep the datum on
+  "Subassembly (through Level 1)" (its datum tolerance auto-fills to
+  **0.10**), and set interface tolerance = **0.10**.
+- Click Calculate Next Level.
 
 **Expected results:**
-- Hole on Part C → **0.05**. It's now on the datum's own component, so the
-  business rule applies again — own tolerance only.
-- Hole on Part A → **0.16**. The path now runs the other direction, C → B →
-  A: `sqrt(0.08² + 0.08² + 0.10² + 0.05²) = sqrt(0.0253) ≈ 0.1591`, which
-  the tool displays rounded to **0.16**.
+- Hole 1 → **0.05**, unchanged from Level 1. Marked "(same body)" — the
+  subassembly carries the datum this level, so everything already in it
+  passes through untouched.
+- Hole 2 → **0.15**, also unchanged, for the same reason.
+- Hole 3 → **0.15**: `sqrt(0.10² + 0.10² + 0.05²) = sqrt(0.0225) = 0.15`.
 
-The point of this example: the graph itself never changes — only the
-starting point does. The tool recalculates every path and every tolerance
-automatically the moment you pick a new datum and click Calculate.
+### Level 2, alternative — datum shifts to the new part instead
+
+Starting over from the same Level 1 result, suppose instead you set Part C
+as the datum-carrying side this time, with a freshly entered datum tolerance
+of **0.50** and interface tolerance **0.10**:
+
+**Expected results:**
+- Hole 3 → **0.05**, unchanged. Part C now carries the datum, so its own
+  feature passes through untouched, marked "(same body)".
+- Hole 1 → **0.51**: `sqrt(0.50² + 0.10² + 0.05²) = sqrt(0.2625) ≈ 0.5123`.
+- Hole 2 → **0.53**: `sqrt(0.50² + 0.10² + 0.15²) = sqrt(0.2825) ≈ 0.5315`.
+
+This shows the key idea: whether a feature "passes through unchanged" or
+"gets recalculated" depends entirely on which side carries the datum at
+*that* level — not on whether it's an old feature or a new one.
 
 ## 6. Input rules and validation
 
-The tool enforces these rules and will show an error message instead of
-silently accepting bad data:
-
-- **Tolerance values must be greater than zero.** Zero or negative
-  tolerances are physically meaningless for this analysis and are rejected
-  for interfaces, features, and the datum alike.
-- **A component cannot be connected to itself.** An interface needs two
-  distinct components on either end.
-- **Duplicate interfaces are not allowed.** If an interface already exists
-  between two components (in either direction), adding another between the
-  same pair is rejected.
-- **You need at least one component before adding a feature**, and **at
-  least two components before adding an interface** — a feature or joint
-  can't exist without something to attach it to.
-- **Calculation cannot proceed without a datum selected** with a positive
-  tolerance. The Calculate button stays disabled until both conditions are
-  met.
+- **Tolerance values must be greater than zero.** This applies to feature
+  tolerances, datum tolerances, and interface tolerances alike — zero or
+  negative values are rejected with an error message.
+- **A part or feature name cannot be empty.**
+- **Features can be added to any part at any time**, whether or not that
+  part has already been used in a calculated level.
+- **Level 1 can only be calculated once.** Once it exists, Section 3 is
+  replaced by a message pointing you to Section 4 for further levels — this
+  keeps the build history consistent and avoids accidentally recalculating
+  from scratch.
+- **A part can only be added to the subassembly once.** Once it's been
+  included in some level's calculation, it no longer appears as an option
+  for a future level — it's already part of the running subassembly.
+- **You need at least one new component selected** in Section 4 before
+  Calculate Next Level becomes meaningful.
