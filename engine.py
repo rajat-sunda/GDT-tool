@@ -57,16 +57,33 @@ def worst_case_combine(tolerance_stack: List[float]) -> float:
 
 @dataclass
 class Subassembly:
+    """A joining stage: two or more children combined via one interface.
+
+    Lifecycle: creating a Subassembly and calling calculate_and_freeze()
+    produces a DRAFT - its results are computed, but it is NOT yet
+    locked. A draft can be recalculated as many times as needed (e.g.
+    after a feature is added to one of its source Parts). It only
+    becomes truly locked (is_locked=True, shows the FROZEN badge) at the
+    moment it is selected as a child while building a NEW, higher-level
+    subassembly - see lock(). Once locked, it can never be recalculated
+    or unlocked again.
+    """
+
     name: str
     children: List[Union[Part, "Subassembly"]]
     datum_child_id: str
     datum_tolerance: float
     interface_tolerance: float
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    is_frozen: bool = False
+    is_locked: bool = False
     frozen_results: Dict[str, FrozenFeatureResult] = field(default_factory=dict)
 
     def _child_features(self, child: Union[Part, "Subassembly"]) -> List[Tuple[str, str, str, float]]:
+        """Return (feature_id, feature_name, source_part_name, current_tolerance)
+        for every feature in `child`, read LIVE - a raw Part's features
+        are read directly off the Part (so edits show up immediately on
+        recalculation), and a Subassembly child's features are read from
+        its most recent frozen_results snapshot."""
         if isinstance(child, Part):
             return [(f.id, f.name, f.source_part_name, f.own_tolerance) for f in child.features]
         elif isinstance(child, Subassembly):
@@ -77,6 +94,22 @@ class Subassembly:
         return []
 
     def calculate_and_freeze(self, method: ToleranceCombinationMethod = rss_combine) -> None:
+        """(Re)calculate this subassembly's feature results from its children's current state.
+
+        Despite the name (kept for API stability), this does NOT lock
+        the subassembly - it only (re)computes frozen_results from
+        whatever the children's live/current values are right now. It
+        can be called repeatedly (e.g. via the "Recalculate" button)
+        for as long as this subassembly remains unlocked.
+
+        Raises:
+            ValueError: if this subassembly is already locked (locked
+                subassemblies can never be recalculated), if fewer than
+                two children are present, or if datum_child_id doesn't
+                match one of the children.
+        """
+        if self.is_locked:
+            raise ValueError(f"'{self.name}' is locked and can no longer be recalculated.")
         if len(self.children) < 2:
             raise ValueError("A subassembly needs at least two children to join.")
 
@@ -101,7 +134,16 @@ class Subassembly:
                 )
 
         self.frozen_results = results
-        self.is_frozen = True
+
+    def lock(self) -> None:
+        """Mark this subassembly as truly, permanently locked.
+
+        Called automatically on any Subassembly child at the moment it
+        is selected as a child while building a new higher-level
+        subassembly. Once locked, calculate_and_freeze() refuses to run
+        again.
+        """
+        self.is_locked = True
 
     @property
     def datum_child_label(self) -> str:
@@ -131,6 +173,9 @@ SAMEBODY_TEXT = "#1E6B3A"
 
 FROZEN_BADGE_BG = "#E3E8EF"
 FROZEN_BADGE_TEXT = "#33415C"
+
+DRAFT_BADGE_BG = "#FFF4E0"
+DRAFT_BADGE_TEXT = "#8A5A00"
 
 FONT_STACK = "'Segoe UI', Arial, sans-serif"
 DECIMALS = 2
@@ -171,6 +216,18 @@ def inject_global_css() -> None:
             display: inline-block;
             background-color: {FROZEN_BADGE_BG};
             color: {FROZEN_BADGE_TEXT};
+            padding: 2px 9px;
+            border-radius: 4px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            font-family: {FONT_STACK};
+            letter-spacing: 0.03em;
+            vertical-align: middle;
+        }}
+        .draft-badge {{
+            display: inline-block;
+            background-color: {DRAFT_BADGE_BG};
+            color: {DRAFT_BADGE_TEXT};
             padding: 2px 9px;
             border-radius: 4px;
             font-size: 0.72rem;
@@ -228,10 +285,15 @@ def styled_section_header(text: str) -> None:
     st.markdown(f"<div class='section-header'>{html.escape(text)}</div>", unsafe_allow_html=True)
 
 
-def styled_panel_title_with_badge(text: str) -> None:
+def styled_panel_title_with_badge(text: str, is_locked: bool) -> None:
+    """Render a main-panel stage title (dark navy) with a FROZEN or DRAFT badge."""
+    badge_html = (
+        "<span class='frozen-badge'>FROZEN</span>"
+        if is_locked
+        else "<span class='draft-badge'>DRAFT</span>"
+    )
     st.markdown(
-        f"<span class='panel-title'>{html.escape(text)}</span>"
-        f"<span class='frozen-badge'>FROZEN</span>",
+        f"<span class='panel-title'>{html.escape(text)}</span>{badge_html}",
         unsafe_allow_html=True,
     )
 
@@ -347,11 +409,13 @@ with st.sidebar:
                 st.success(f"Added part '{name}'.")
 
     styled_section_header("2. Features")
-    unconsumed_parts = [p for p in st.session_state.parts if not is_consumed(p.id)]
-    if not unconsumed_parts:
-        st.info("Add a part (that hasn't been used in a subassembly yet) before adding features.")
+    if not st.session_state.parts:
+        st.info("Add a part before adding features.")
     else:
-        part_options = {p.id: p.name for p in unconsumed_parts}
+        # Features can be added to ANY part at any time, whether or not
+        # it has already been used in a subassembly - draft subassemblies
+        # built from it can then be recalculated to pick up the change.
+        part_options = {p.id: p.name for p in st.session_state.parts}
         with st.form("add_feature_form", clear_on_submit=True):
             target_part_id = st.selectbox(
                 "Add a feature to which part?",
@@ -376,7 +440,7 @@ with st.sidebar:
 
     for part in st.session_state.parts:
         consumed = is_consumed(part.id)
-        label = part.name + ("  (used - locked)" if consumed else "")
+        label = part.name + ("  (used in a subassembly)" if consumed else "")
         with st.expander(label):
             if part.features:
                 for feat in part.features:
@@ -444,7 +508,12 @@ with st.sidebar:
                 "Name this subassembly", value=default_sub_name, key="subassembly_name_input",
             )
 
-            if st.button("Calculate and Freeze", type="primary"):
+            st.caption(
+                "Creates a new DRAFT subassembly. It stays editable/recalculable "
+                "until it's selected as a child of a later subassembly, at which "
+                "point it becomes permanently locked (FROZEN)."
+            )
+            if st.button("Calculate", type="primary"):
                 name = subassembly_name.strip()
                 if not name:
                     st.error("Subassembly name cannot be empty.")
@@ -465,18 +534,26 @@ with st.sidebar:
                     except ValueError as exc:
                         st.error(str(exc))
                     else:
+                        # Consuming these children as inputs to a new stage is what
+                        # permanently locks any of them that are themselves
+                        # subassemblies - raw Parts are never locked (they stay
+                        # editable indefinitely per the new freezing rule).
+                        for child in selected_units:
+                            if isinstance(child, Subassembly):
+                                child.lock()
+
                         st.session_state.available_unit_ids = [
                             uid for uid in st.session_state.available_unit_ids if uid not in selected_ids
                         ]
                         st.session_state.available_unit_ids.append(new_sub.id)
                         st.session_state.subassemblies.append(new_sub)
-                        st.success(f"'{name}' calculated and frozen.")
+                        st.success(f"'{name}' calculated (draft).")
                         st.rerun()
 
 
 if st.session_state.subassemblies:
     for sub in st.session_state.subassemblies:
-        styled_panel_title_with_badge(sub.name)
+        styled_panel_title_with_badge(sub.name, sub.is_locked)
         st.markdown(
             f"<div class='stage-meta'>Joined: {html.escape(', '.join(sub.child_names))} "
             f"&nbsp;|&nbsp; Datum: {html.escape(sub.datum_child_label)} "
@@ -486,15 +563,37 @@ if st.session_state.subassemblies:
         )
         st.markdown(build_subassembly_table_html(sub), unsafe_allow_html=True)
 
-        export_df = build_subassembly_export_dataframe(sub)
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            f"Export '{sub.name}' Results to CSV",
-            data=csv_bytes,
-            file_name=f"{sub.name.replace(' ', '_')}_results.csv",
-            mime="text/csv",
-            key=f"export_{sub.id}",
-        )
+        button_col, export_col = st.columns([1, 2])
+
+        with button_col:
+            if not sub.is_locked:
+                if st.button(f"Recalculate", key=f"recalc_{sub.id}"):
+                    try:
+                        sub.calculate_and_freeze()
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(f"'{sub.name}' recalculated.")
+                        st.rerun()
+
+        with export_col:
+            export_df = build_subassembly_export_dataframe(sub)
+            csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"Export '{sub.name}' Results to CSV",
+                data=csv_bytes,
+                file_name=f"{sub.name.replace(' ', '_')}_results.csv",
+                mime="text/csv",
+                key=f"export_{sub.id}",
+            )
+
+        if not sub.is_locked:
+            st.caption(
+                "This subassembly is a draft. If a child subassembly's inputs "
+                "changed, recalculate it first, then recalculate this one to "
+                "pick up the update."
+            )
+
         st.divider()
 else:
     st.info(
