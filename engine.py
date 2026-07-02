@@ -3,29 +3,40 @@ app.py
 
 Assembly Tolerance Propagation Tool
 ------------------------------------
-A simple Streamlit app for GD&T tolerance stack-up analysis.
+A simple Streamlit app for GD&T tolerance stack-up analysis, now
+supporting multiple assembly levels (subassemblies built on top of
+subassemblies).
 
-Parts get joined into a single subassembly. Every feature (hole, slot,
-etc.) on every part has a positional tolerance. This tool calculates
-each feature's effective assembly-level tolerance using Root Sum
-Square (RSS):
+Core rule (unchanged):
+    Feature is on the datum side  -> effective tolerance = its current
+                                      tolerance, no RSS ("same body")
+    Feature is on the other side  -> effective tolerance =
+                                      sqrt(datum_tolerance**2
+                                           + interface_tolerance**2
+                                           + current_tolerance**2)
 
-    Feature is on the same part as the datum
-        -> effective tolerance = its own tolerance (no RSS)
+How multi-level works:
+    Level 1: pick a datum part from your raw parts, set datum tolerance
+    and interface tolerance, click Calculate. This produces the first
+    results table.
 
-    Feature is on any other part
-        -> effective tolerance = sqrt(datum_tolerance**2
-                                       + interface_tolerance**2
-                                       + feature_tolerance**2)
+    Level 2+: add one or more NEW parts, then choose whether the datum
+    for this level stays on "the subassembly built so far" (its
+    existing features simply pass through unchanged) or shifts to one
+    of the new parts you just added (in which case the subassembly's
+    existing features get RSS-combined with the new datum + interface,
+    using their most recently calculated value as the input). Click
+    Calculate Next Level. A new table is appended below the previous
+    one - nothing is overwritten or removed.
 
-No graphs, no paths, no multi-stage hierarchy - just one flat set of
-parts, one datum, one interface tolerance, calculated in one pass.
+No export, no save button - everything lives in st.session_state and
+stays visible in the interface as you go.
 """
 
 import math
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import streamlit as st
 
@@ -36,59 +47,41 @@ import streamlit as st
 
 @dataclass
 class Part:
-    """A physical part in the assembly.
-
-    Attributes:
-        name: Human-readable part name.
-        id: Unique identifier, auto-generated with uuid4.
-    """
+    """A physical part in the assembly."""
     name: str
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 @dataclass
 class Feature:
-    """A toleranced feature (hole, slot, etc.) defined on a Part.
-
-    Attributes:
-        name: Human-readable feature name.
-        part_id: Id of the Part this feature belongs to.
-        tolerance: The feature's own positional tolerance, in mm.
-        id: Unique identifier, auto-generated with uuid4.
-    """
+    """A toleranced feature (hole, slot, etc.) defined on a Part."""
     name: str
     part_id: str
     tolerance: float
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
-def calculate_effective_tolerance(
-    feature: Feature,
-    datum_part_id: str,
-    datum_tolerance: float,
-    interface_tolerance: float,
-) -> float:
-    """Calculate one feature's effective assembly-level tolerance.
-
-    Business rule:
-        If the feature is on the same part as the datum, its effective
-        tolerance is simply its own tolerance - no RSS is applied.
-        Otherwise, effective tolerance is the RSS of the datum
-        tolerance, the interface tolerance, and the feature's own
-        tolerance.
+def combine(current_tolerance: float, is_datum_side: bool, datum_tolerance: float, interface_tolerance: float) -> float:
+    """Apply the same-body / RSS rule to a single feature's current tolerance.
 
     Args:
-        feature: The Feature to calculate for.
-        datum_part_id: Id of whichever Part carries the datum.
-        datum_tolerance: The datum's own tolerance, in mm.
-        interface_tolerance: The joining interface tolerance, in mm.
+        current_tolerance: The feature's tolerance going into this
+            level's calculation - its own drawing tolerance if this is
+            the first time it's being included, or its most recently
+            calculated effective tolerance if it was carried forward
+            from an earlier level.
+        is_datum_side: True if this feature's part (or the "built so
+            far" subassembly it belongs to) carries the datum at this
+            level.
+        datum_tolerance: This level's datum tolerance, in mm.
+        interface_tolerance: This level's interface tolerance, in mm.
 
     Returns:
-        The effective tolerance, in mm.
+        The effective tolerance for this level, in mm.
     """
-    if feature.part_id == datum_part_id:
-        return feature.tolerance
-    return math.sqrt(datum_tolerance ** 2 + interface_tolerance ** 2 + feature.tolerance ** 2)
+    if is_datum_side:
+        return current_tolerance
+    return math.sqrt(datum_tolerance ** 2 + interface_tolerance ** 2 + current_tolerance ** 2)
 
 
 # =============================================================================
@@ -109,8 +102,7 @@ DECIMALS = 2
 
 
 def inject_global_css() -> None:
-    """Inject the one-time global <style> block for the results table,
-    sidebar section headers, and the Calculate button."""
+    """Inject the one-time global <style> block."""
     st.markdown(
         f"""
         <style>
@@ -121,6 +113,14 @@ def inject_global_css() -> None:
             font-size: 1.05rem;
             margin-top: 0.6rem;
             margin-bottom: 0.3rem;
+        }}
+        .stage-title {{
+            color: {DARK_NAVY};
+            font-weight: 700;
+            font-family: {FONT_STACK};
+            font-size: 1.2rem;
+            margin-top: 1.2rem;
+            margin-bottom: 0.4rem;
         }}
         .samebody-badge {{
             display: inline-block;
@@ -171,20 +171,19 @@ def inject_global_css() -> None:
 
 
 def styled_section_header(text: str) -> None:
-    """Render a sidebar section header in dark navy bold."""
     st.markdown(f"<div class='section-header'>{text}</div>", unsafe_allow_html=True)
 
 
+def styled_stage_title(text: str) -> None:
+    st.markdown(f"<div class='stage-title'>{text}</div>", unsafe_allow_html=True)
+
+
 def build_results_table_html(rows: List[dict]) -> str:
-    """Build the styled results table as HTML.
+    """Build the styled results table as HTML for one stage's rows.
 
     Args:
-        rows: List of dicts, each with keys: feature_name, part_name,
+        rows: List of dicts with keys: feature_name, part_name,
             datum_reference, effective_tolerance, same_body.
-
-    Returns:
-        A complete <table> as an HTML string, ready for
-        st.markdown(..., unsafe_allow_html=True).
     """
     header_html = (
         "<tr>"
@@ -228,6 +227,93 @@ def build_results_table_html(rows: List[dict]) -> str:
 
 
 # =============================================================================
+# Calculation
+# =============================================================================
+
+def run_level_calculation(
+    datum_is_subassembly: bool,
+    datum_part_id: Optional[str],
+    datum_tolerance: float,
+    interface_tolerance: float,
+    new_part_ids: List[str],
+    datum_label: str,
+) -> List[dict]:
+    """Run one assembly level's calculation and update running state.
+
+    Every feature already folded into the subassembly (from earlier
+    levels) carries forward its most recent effective tolerance as the
+    input to this level. Every feature on a brand-new part uses its own
+    original drawing tolerance as the input. Whichever side carries the
+    datum this level passes through unchanged; everything else gets
+    RSS-combined with this level's datum and interface tolerances.
+
+    Args:
+        datum_is_subassembly: True if the datum stays on the
+            already-built subassembly this level (only possible from
+            level 2 onward).
+        datum_part_id: Id of the new part carrying the datum this
+            level, or None if datum_is_subassembly is True.
+        datum_tolerance: This level's datum tolerance, in mm.
+        interface_tolerance: This level's interface tolerance, in mm.
+        new_part_ids: Ids of the parts being folded in at this level
+            (for level 1, this is every part that currently has
+            features).
+        datum_label: Human-readable label for the "Datum Reference"
+            column (a part name, or "Subassembly (Level N)").
+
+    Returns:
+        The list of row dicts for this level's results table.
+    """
+    part_lookup = {p.id: p.name for p in st.session_state.parts}
+    rows: List[dict] = []
+    updated_tolerances: Dict[str, float] = {}
+
+    # Features already part of the subassembly from earlier levels.
+    for part in st.session_state.parts:
+        if part.id not in st.session_state.included_part_ids:
+            continue
+        part_features = [f for f in st.session_state.features if f.part_id == part.id]
+        for feat in part_features:
+            current_val = st.session_state.current_tolerances[feat.id]
+            is_datum_side = datum_is_subassembly
+            effective = combine(current_val, is_datum_side, datum_tolerance, interface_tolerance)
+            rows.append(
+                {
+                    "feature_name": feat.name,
+                    "part_name": part_lookup[part.id],
+                    "datum_reference": datum_label,
+                    "effective_tolerance": effective,
+                    "same_body": is_datum_side,
+                }
+            )
+            updated_tolerances[feat.id] = effective
+
+    # Features on parts newly added at this level.
+    for pid in new_part_ids:
+        part_features = [f for f in st.session_state.features if f.part_id == pid]
+        for feat in part_features:
+            current_val = feat.tolerance
+            is_datum_side = (not datum_is_subassembly) and (pid == datum_part_id)
+            effective = combine(current_val, is_datum_side, datum_tolerance, interface_tolerance)
+            rows.append(
+                {
+                    "feature_name": feat.name,
+                    "part_name": part_lookup[pid],
+                    "datum_reference": datum_label,
+                    "effective_tolerance": effective,
+                    "same_body": is_datum_side,
+                }
+            )
+            updated_tolerances[feat.id] = effective
+
+    st.session_state.current_tolerances.update(updated_tolerances)
+    st.session_state.included_part_ids.update(new_part_ids)
+    st.session_state.last_datum_tolerance = datum_tolerance
+
+    return rows
+
+
+# =============================================================================
 # Streamlit UI
 # =============================================================================
 
@@ -238,9 +324,12 @@ inject_global_css()
 def init_session_state() -> None:
     """Initialize all required session_state keys exactly once. Starts empty."""
     defaults = {
-        "parts": [],      # list[Part]
-        "features": [],   # list[Feature]
-        "results": None,  # list[dict] or None
+        "parts": [],                  # list[Part]
+        "features": [],                # list[Feature]
+        "stages": [],                  # list[{"title": str, "rows": list[dict]}]
+        "current_tolerances": {},      # feature_id -> latest effective tolerance
+        "included_part_ids": set(),    # part ids already folded into the subassembly
+        "last_datum_tolerance": 0.0,   # datum tolerance used at the most recent level
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -264,7 +353,6 @@ with st.sidebar:
                 st.error("Part name cannot be empty.")
             else:
                 st.session_state.parts.append(Part(name=name))
-                st.session_state.results = None
                 st.success(f"Added part '{name}'.")
 
     for part in st.session_state.parts:
@@ -274,7 +362,7 @@ with st.sidebar:
             removed_id = part.id
             st.session_state.parts = [p for p in st.session_state.parts if p.id != removed_id]
             st.session_state.features = [f for f in st.session_state.features if f.part_id != removed_id]
-            st.session_state.results = None
+            st.session_state.included_part_ids.discard(removed_id)
             st.rerun()
 
     st.divider()
@@ -307,10 +395,8 @@ with st.sidebar:
                     st.session_state.features.append(
                         Feature(name=name, part_id=feature_part_id, tolerance=round(feature_tolerance, DECIMALS))
                     )
-                    st.session_state.results = None
                     st.success(f"Added feature '{name}'.")
 
-    # Features grouped under their part
     for part in st.session_state.parts:
         part_features = [f for f in st.session_state.features if f.part_id == part.id]
         if part_features:
@@ -320,75 +406,146 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Section 3: Assembly Setup ---
+    # --- Section 3: Assembly Setup (Level 1 only) ---
     styled_section_header("3. Assembly Setup")
-    if not st.session_state.parts:
-        st.info("Add at least one part to set up the assembly.")
-        datum_part_id: Optional[str] = None
-        datum_tolerance = 0.0
-        interface_tolerance = 0.0
+
+    if st.session_state.stages:
+        st.caption("Level 1 is already calculated. Use Section 4 below to add more components.")
     else:
-        part_options = {p.id: p.name for p in st.session_state.parts}
-        datum_part_id = st.selectbox(
-            "Which part carries the datum?",
-            options=list(part_options.keys()),
-            format_func=lambda pid: part_options[pid],
-        )
-        datum_tolerance = st.number_input(
-            "Datum tolerance (mm)", min_value=0.0, value=0.0,
-            step=0.01, format=f"%.{DECIMALS}f",
-        )
-        interface_tolerance = st.number_input(
-            "Interface tolerance (mm)", min_value=0.0, value=0.0,
-            step=0.01, format=f"%.{DECIMALS}f",
-        )
-
-    calculate_clicked = st.button("Calculate", type="primary")
-
-    if calculate_clicked:
-        if not st.session_state.parts:
-            st.error("Add at least one part before calculating.")
-        elif not st.session_state.features:
-            st.error("Add at least one feature before calculating.")
-        elif datum_part_id is None:
-            st.error("Select which part carries the datum before calculating.")
-        elif datum_tolerance <= 0:
-            st.error("Datum tolerance must be a positive number greater than zero.")
-        elif interface_tolerance <= 0:
-            st.error("Interface tolerance must be a positive number greater than zero.")
+        parts_with_features = [
+            p for p in st.session_state.parts
+            if any(f.part_id == p.id for f in st.session_state.features)
+        ]
+        if not parts_with_features:
+            st.info("Add at least one part with a feature to set up the assembly.")
         else:
-            part_lookup = {p.id: p.name for p in st.session_state.parts}
-            datum_part_name = part_lookup[datum_part_id]
+            part_options = {p.id: p.name for p in parts_with_features}
+            datum_part_id = st.selectbox(
+                "Which part carries the datum?",
+                options=list(part_options.keys()),
+                format_func=lambda pid: part_options[pid],
+                key="level1_datum_part",
+            )
+            datum_tolerance = st.number_input(
+                "Datum tolerance (mm)", min_value=0.0, value=0.0,
+                step=0.01, format=f"%.{DECIMALS}f", key="level1_datum_tol",
+            )
+            interface_tolerance = st.number_input(
+                "Interface tolerance (mm)", min_value=0.0, value=0.0,
+                step=0.01, format=f"%.{DECIMALS}f", key="level1_interface_tol",
+            )
 
-            rows = []
-            for part in st.session_state.parts:
-                part_features = [f for f in st.session_state.features if f.part_id == part.id]
-                if not part_features:
-                    # Skip parts with no features silently.
-                    continue
-                for feat in part_features:
-                    effective = calculate_effective_tolerance(
-                        feat, datum_part_id, datum_tolerance, interface_tolerance
+            if st.button("Calculate", type="primary"):
+                if datum_tolerance <= 0:
+                    st.error("Datum tolerance must be a positive number greater than zero.")
+                elif interface_tolerance <= 0:
+                    st.error("Interface tolerance must be a positive number greater than zero.")
+                else:
+                    part_lookup = {p.id: p.name for p in st.session_state.parts}
+                    new_part_ids = [p.id for p in parts_with_features]
+                    rows = run_level_calculation(
+                        datum_is_subassembly=False,
+                        datum_part_id=datum_part_id,
+                        datum_tolerance=round(datum_tolerance, DECIMALS),
+                        interface_tolerance=round(interface_tolerance, DECIMALS),
+                        new_part_ids=new_part_ids,
+                        datum_label=part_lookup[datum_part_id],
                     )
-                    rows.append(
-                        {
-                            "feature_name": feat.name,
-                            "part_name": part_lookup[feat.part_id],
-                            "datum_reference": datum_part_name,
-                            "effective_tolerance": effective,
-                            "same_body": feat.part_id == datum_part_id,
-                        }
+                    st.session_state.stages.append({"title": "Subassembly - Level 1", "rows": rows})
+                    st.rerun()
+
+    st.divider()
+
+    # --- Section 4: Add Next Assembly Level ---
+    if st.session_state.stages:
+        styled_section_header("4. Add Next Assembly Level")
+
+        available_new_parts = [
+            p for p in st.session_state.parts
+            if p.id not in st.session_state.included_part_ids
+            and any(f.part_id == p.id for f in st.session_state.features)
+        ]
+
+        if not available_new_parts:
+            st.info("Add a new part (with at least one feature) above to build the next level.")
+        else:
+            new_part_options = {p.id: p.name for p in available_new_parts}
+            selected_new_part_ids = st.multiselect(
+                "Which new component(s) are joining this level?",
+                options=list(new_part_options.keys()),
+                format_func=lambda pid: new_part_options[pid],
+                key="level_new_parts",
+            )
+
+            if not selected_new_part_ids:
+                st.caption("Select at least one new component to continue.")
+            else:
+                next_level_number = len(st.session_state.stages) + 1
+                subassembly_option = f"Subassembly (through Level {next_level_number - 1})"
+                datum_side_options = [subassembly_option] + [
+                    new_part_options[pid] for pid in selected_new_part_ids
+                ]
+                datum_side_choice = st.selectbox(
+                    "Which side carries the datum for this level?",
+                    options=datum_side_options,
+                    key="level_datum_side",
+                )
+
+                datum_is_subassembly = (datum_side_choice == subassembly_option)
+
+                if datum_is_subassembly:
+                    st.number_input(
+                        "Datum tolerance (mm) \u2014 inherited from the subassembly",
+                        value=float(st.session_state.last_datum_tolerance),
+                        disabled=True, format=f"%.{DECIMALS}f", key="level_datum_tol_display",
                     )
+                    next_datum_tolerance = st.session_state.last_datum_tolerance
+                    next_datum_part_id = None
+                    next_datum_label = subassembly_option
+                else:
+                    next_datum_tolerance = st.number_input(
+                        "Datum tolerance (mm)", min_value=0.0, value=0.0,
+                        step=0.01, format=f"%.{DECIMALS}f", key="level_datum_tol_input",
+                    )
+                    chosen_name = datum_side_choice
+                    next_datum_part_id = next(
+                        pid for pid in selected_new_part_ids if new_part_options[pid] == chosen_name
+                    )
+                    next_datum_label = chosen_name
 
-            st.session_state.results = rows
+                next_interface_tolerance = st.number_input(
+                    "Interface tolerance (mm)", min_value=0.0, value=0.0,
+                    step=0.01, format=f"%.{DECIMALS}f", key="level_interface_tol",
+                )
+
+                if st.button("Calculate Next Level", type="primary"):
+                    if (not datum_is_subassembly) and next_datum_tolerance <= 0:
+                        st.error("Datum tolerance must be a positive number greater than zero.")
+                    elif next_interface_tolerance <= 0:
+                        st.error("Interface tolerance must be a positive number greater than zero.")
+                    else:
+                        rows = run_level_calculation(
+                            datum_is_subassembly=datum_is_subassembly,
+                            datum_part_id=next_datum_part_id,
+                            datum_tolerance=round(next_datum_tolerance, DECIMALS),
+                            interface_tolerance=round(next_interface_tolerance, DECIMALS),
+                            new_part_ids=selected_new_part_ids,
+                            datum_label=next_datum_label,
+                        )
+                        st.session_state.stages.append(
+                            {"title": f"Subassembly - Level {next_level_number}", "rows": rows}
+                        )
+                        st.rerun()
 
 
-# -- Main panel -------------------------------------------------------------
+# -- Main panel: every level's table, stacked, oldest first ----------------
 
-if st.session_state.results is not None:
-    if len(st.session_state.results) == 0:
-        st.info("No features to display.")
-    else:
-        st.markdown(build_results_table_html(st.session_state.results), unsafe_allow_html=True)
-else:
+if not st.session_state.stages:
     st.info("Add parts and features in the sidebar, set up the assembly, then click Calculate.")
+else:
+    for stage in st.session_state.stages:
+        styled_stage_title(stage["title"])
+        if len(stage["rows"]) == 0:
+            st.info("No features to display for this level.")
+        else:
+            st.markdown(build_results_table_html(stage["rows"]), unsafe_allow_html=True)
