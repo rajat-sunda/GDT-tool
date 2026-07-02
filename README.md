@@ -22,6 +22,8 @@ the whole build history at a glance.
 
 The math behind it is called **Root Sum Square (RSS)** 
 
+Live app: http://gdt-tool.streamlit.app/
+
 ## 2. How to install and run
 
 **Requirements:** Python 3.9 or above.
