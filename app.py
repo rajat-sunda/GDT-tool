@@ -34,10 +34,12 @@ stays visible in the interface as you go.
 """
 
 import math
+import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
 import streamlit as st
 
 
@@ -82,6 +84,75 @@ def combine(current_tolerance: float, is_datum_side: bool, datum_tolerance: floa
     if is_datum_side:
         return current_tolerance
     return math.sqrt(datum_tolerance ** 2 + interface_tolerance ** 2 + current_tolerance ** 2)
+
+
+def parse_excel_import(uploaded_file) -> Tuple[str, List[Tuple[str, float]], List[str], bool]:
+    """Parse an uploaded Excel file into a part name and a list of features.
+
+    File format convention: the filename (without extension) is the part
+    name. Column A holds feature names, Column B holds tolerances, no
+    header row - row 1 is the first data row.
+
+    Args:
+        uploaded_file: The object returned by st.file_uploader.
+
+    Returns:
+        A tuple of (part_name, valid_rows, messages, is_read_error):
+            part_name: The part name derived from the filename.
+            valid_rows: List of (feature_name, tolerance) tuples that
+                passed validation.
+            messages: Warning strings for skipped rows, or - if
+                is_read_error is True - a single-item list containing
+                the read-failure message instead.
+            is_read_error: True if the file itself couldn't be read at
+                all (wrong format, corrupted, unreadable).
+    """
+    name_no_ext, ext = os.path.splitext(uploaded_file.name)
+    part_name = name_no_ext.strip()
+    ext = ext.lower()
+
+    try:
+        if ext == ".xlsx":
+            df = pd.read_excel(uploaded_file, header=None, engine="openpyxl")
+        elif ext == ".xls":
+            df = pd.read_excel(uploaded_file, header=None, engine="xlrd")
+        else:
+            return part_name, [], [f"Unsupported file type '{ext}'. Please upload a .xlsx or .xls file."], True
+    except Exception as exc:
+        return part_name, [], [f"Could not read the file: {exc}"], True
+
+    if df.empty:
+        return part_name, [], [], False
+
+    valid_rows: List[Tuple[str, float]] = []
+    warnings: List[str] = []
+    for idx, row in df.iterrows():
+        row_number = idx + 1
+        raw_name = row[0] if df.shape[1] > 0 else None
+        raw_tol = row[1] if df.shape[1] > 1 else None
+
+        name = str(raw_name).strip() if pd.notna(raw_name) else ""
+        if not name:
+            warnings.append(f"Row {row_number}: skipped - feature name is empty.")
+            continue
+
+        if pd.isna(raw_tol):
+            warnings.append(f"Row {row_number}: skipped - tolerance is empty.")
+            continue
+
+        try:
+            tol = float(raw_tol)
+        except (TypeError, ValueError):
+            warnings.append(f"Row {row_number}: skipped - tolerance '{raw_tol}' is not a number.")
+            continue
+
+        if tol <= 0:
+            warnings.append(f"Row {row_number}: skipped - tolerance must be greater than zero (got {tol}).")
+            continue
+
+        valid_rows.append((name, tol))
+
+    return part_name, valid_rows, warnings, False
 
 
 # =============================================================================
@@ -330,6 +401,7 @@ def init_session_state() -> None:
         "current_tolerances": {},      # feature_id -> latest effective tolerance
         "included_part_ids": set(),    # part ids already folded into the subassembly
         "last_datum_tolerance": 0.0,   # datum tolerance used at the most recent level
+        "excel_uploader_counter": 0,   # incremented after each successful import to reset the uploader
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -363,6 +435,51 @@ with st.sidebar:
             st.session_state.parts = [p for p in st.session_state.parts if p.id != removed_id]
             st.session_state.features = [f for f in st.session_state.features if f.part_id != removed_id]
             st.session_state.included_part_ids.discard(removed_id)
+            st.rerun()
+
+    st.divider()
+
+    # --- Section 1b: Import from Excel ---
+    styled_section_header("1b. Import from Excel")
+
+    uploaded_file = st.file_uploader(
+        "Upload a part's Excel file",
+        type=["xlsx", "xls"],
+        accept_multiple_files=False,
+        key=f"excel_uploader_{st.session_state.excel_uploader_counter}",
+    )
+    st.caption(
+        "File name = part name. Column A: feature names. "
+        "Column B: tolerances (mm). No header row."
+    )
+
+    if uploaded_file is not None:
+        part_name, valid_rows, messages, is_read_error = parse_excel_import(uploaded_file)
+
+        if is_read_error:
+            st.error(messages[0])
+        elif any(p.name == part_name for p in st.session_state.parts):
+            st.error(
+                f"A part named '{part_name}' already exists. "
+                "Rename the file or remove the existing part first."
+            )
+        elif not valid_rows:
+            st.error("No valid rows found in the file. Nothing was imported.")
+            for msg in messages:
+                st.warning(msg)
+        else:
+            for msg in messages:
+                st.warning(msg)
+
+            new_part = Part(name=part_name)
+            st.session_state.parts.append(new_part)
+            for feature_name, feature_tolerance in valid_rows:
+                st.session_state.features.append(
+                    Feature(name=feature_name, part_id=new_part.id, tolerance=round(feature_tolerance, DECIMALS))
+                )
+
+            st.success(f"Imported {len(valid_rows)} features into part '{part_name}'.")
+            st.session_state.excel_uploader_counter += 1
             st.rerun()
 
     st.divider()
