@@ -2,8 +2,8 @@
 
 ## 1. What this tool does
 
-When you build something out of multiple parts, a car body, a bracket
-assembly, anything with holes or slots that need to line up, the tolerance
+When you build something out of multiple parts — a car body, a bracket
+assembly, anything with holes or slots that need to line up — the tolerance
 on any one part's drawing isn't the whole story. Once parts get joined
 together, the joints themselves add variation, and that variation stacks up.
 This tool calculates that stack-up.
@@ -11,7 +11,7 @@ This tool calculates that stack-up.
 You tell it what parts you have, what toleranced features (holes, slots,
 etc.) live on each part, which part is your reference datum, and how loose
 the joints are. It then works out the **effective tolerance** of every
-feature at the assembly level, not just what the drawing says, but what you
+feature at the assembly level — not just what the drawing says, but what you
 can actually expect once everything is bolted, welded, or riveted together.
 
 It also supports building up in stages: calculate a first subassembly, then
@@ -20,9 +20,8 @@ way a real production line adds one station after another. Each stage's
 results stay visible on screen, stacked one below the other, so you can see
 the whole build history at a glance.
 
-The math behind it is called **Root Sum Square (RSS)** 
-
-Live app: http://gdt-tool.streamlit.app/
+The math behind it is called **Root Sum Square (RSS)** — more on that in
+Section 4.
 
 ## 2. How to install and run
 
@@ -56,6 +55,17 @@ enter lives only in that browser session; closing the tab clears it.
    "Part A") and click **Add Part**. Repeat for every part you're starting
    with. Each one appears in a list with a Remove button if you need to
    delete it.
+
+   Instead of typing parts and features in one at a time, you can also
+   **import a part straight from Excel**. Under "1b. Import from Excel,"
+   upload a `.xlsx` or `.xls` file. The file name becomes the part name -
+   `B-Pillar Inner.xlsx` creates a part called "B-Pillar Inner." The file
+   itself needs no header row: Column A holds feature names, Column B holds
+   their tolerances (mm), one feature per row. Any row with a blank feature
+   name or a tolerance that isn't a positive number is skipped, with a
+   warning telling you which row and why - the rest of the file still
+   imports normally. If the part name already exists, the import is
+   rejected with an error instead of creating a duplicate.
 
 2. **Add Features.** Under "2. Features," pick a part from the dropdown,
    give the feature a name (e.g. "Hole 1"), and enter its own positional
@@ -200,6 +210,13 @@ This shows the key idea: whether a feature "passes through unchanged" or
   tolerances, datum tolerances, and interface tolerances alike — zero or
   negative values are rejected with an error message.
 - **A part or feature name cannot be empty.**
+- **Excel imports use the filename as the part name**, and are rejected if
+  a part with that name already exists — rename the file or remove the
+  existing part first. A row is skipped (with a warning, not an error) if
+  its feature name is blank or its tolerance isn't a positive number; a
+  file that has no valid rows at all is rejected outright, and a file that
+  can't be read (wrong format, corrupted, empty) shows a clear error
+  instead of crashing.
 - **Features can be added to any part at any time**, whether or not that
   part has already been used in a calculated level.
 - **Level 1 can only be calculated once.** Once it exists, Section 3 is
